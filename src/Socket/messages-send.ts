@@ -1033,7 +1033,22 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
 
 			await sendNode(stanza)
+/*
+			// Log with [BAILEYS] prefix
+			logMessageSent(msgId, destinationJid)
 
+			// Record message sent metric
+			const msgType = message.conversation ? 'text'
+				: message.imageMessage ? 'image'
+				: message.videoMessage ? 'video'
+				: message.audioMessage ? 'audio'
+				: message.documentMessage ? 'document'
+				: message.stickerMessage ? 'sticker'
+				: message.stickerPackMessage ? 'sticker_pack'
+				: message.reactionMessage ? 'reaction'
+				: 'other'
+			recordMessageSent(msgType)
+*/
 			// Add message to retry cache if enabled
 			if (messageRetryManager && !participant) {
 				messageRetryManager.addRecentMessage(destinationJid, msgId, message)
