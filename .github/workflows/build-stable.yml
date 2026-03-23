@@ -1,0 +1,84 @@
+name: Build and Release stable
+
+on:
+  workflow_dispatch: # Memungkinkan kamu memicu workflow ini secara manual (tombol "Run workflow")
+  push:
+    branches:
+      - master # Otomatis berjalan setiap kali ada kode baru yang di-push ke master
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Diperlukan agar bot bisa melakukan push ke branch baru
+
+    steps:
+      - name: 📦 Checkout Master Branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2 # Mengambil sedikit history untuk membaca pesan commit terakhir
+
+      - name: 🥟 Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: ⚙️ Install Dependencies & Build
+        run: |
+          bun install
+          bun run build
+
+      - name: 🤖 Generate Professional AI Commit Message
+        id: ai_commit
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          # Mengambil pesan commit terakhir di master
+          LAST_MSG=$(git log -1 --pretty=%B)
+          
+          if [ -z "$GEMINI_API_KEY" ]; then
+            # Fallback jika API Key belum dipasang
+            echo "MSG=build(release): automated compilation and optimization from master" >> $GITHUB_OUTPUT
+          else
+            # Meminta AI membuat pesan profesional
+            PROMPT="Rewrite this git commit message into a highly professional, single-line conventional commit message for an automated build release (without quotes): $LAST_MSG"
+            RESPONSE=$(curl -s -H "Content-Type: application/json" \
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_API_KEY" \
+              -d "{\"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]}")
+            
+            # Ekstrak teks dari respon JSON AI
+            AI_MSG=$(echo $RESPONSE | jq -r '.candidates[0].content.parts[0].text' | tr -d '"' | tr -d '\n')
+            echo "MSG=$AI_MSG" >> $GITHUB_OUTPUT
+          fi
+
+      - name: 🧹 Prepare Clean Release Directory
+        run: |
+          mkdir release_dist
+          cp -r lib release_dist/
+          cp -r WAProto release_dist/
+          cp LICENSE release_dist/
+          cp README.md release_dist/
+          cp engine-requirements.js release_dist/
+          
+          # Menggunakan jq untuk menghapus konfigurasi build dan typescript dari package.json
+          jq 'del(.devDependencies, .dependencies.typescript, .dependencies["tsc-esm-fix"], .scripts.postinstall, .scripts.prepare, .scripts.prepack, .scripts.build, .scripts["build:all"])' package.json > release_dist/package.json
+
+      - name: 🚀 Push to 'stable' Branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd release_dist
+          
+          # Inisialisasi git baru agar history sebelumnya terhapus (membuat size clone sangat kecil!)
+          git init
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Buat branch baru dan commit file
+          git checkout -b stable
+          git add .
+          git commit -m "${{ steps.ai_commit.outputs.MSG }}"
+          
+          # Force push ke repositori (menimpa branch bun-build yang lama)
+          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
+          git push -f origin stable
