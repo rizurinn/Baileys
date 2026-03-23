@@ -1,34 +1,22 @@
+import { Boom } from '@hapi/boom'
 import { createHash } from 'crypto'
 import { zipSync } from 'fflate'
 import { promises as fs } from 'fs'
-import { Boom } from '@hapi/boom'
-import { gzipSync, gunzipSync } from 'zlib'
+import { gunzipSync, gzipSync } from 'zlib'
 import { proto } from '../../WAProto/index.js'
 import type { MediaType } from '../Defaults/index.js'
-import type { Sticker, StickerPack, WAMediaUpload, WAMediaUploadFunction } from '../Types/Message.js'
-import type { ILogger } from './logger.js'
+import type { StickerPack, WAMediaUpload, WAMediaUploadFunction } from '../Types/Message.js'
 import { generateMessageIDV2 } from './generics.js'
-import { getImageProcessingLibrary, encryptedStream } from './messages-media.js'
+import type { ILogger } from './logger.js'
+import { encryptedStream, getImageProcessingLibrary } from './messages-media.js'
 
 /**
  * Verifica se um buffer é um arquivo WebP válido
  * Valida os magic bytes: RIFF....WEBP
- *
- * @param buffer - Buffer to check
- * @returns true if buffer is valid WebP format
- *
- * @example
- * ```typescript
- * const buffer = await readFile('image.webp')
- * if (isWebPBuffer(buffer)) {
- *   console.log('Valid WebP file')
- * }
- * ```
  */
 export const isWebPBuffer = (buffer: Buffer): boolean => {
 	if (buffer.length < 12) return false
 
-	// Verifica magic bytes RIFF (0-3) e WEBP (8-11)
 	const riffHeader = buffer.toString('ascii', 0, 4)
 	const webpHeader = buffer.toString('ascii', 8, 12)
 
@@ -37,65 +25,30 @@ export const isWebPBuffer = (buffer: Buffer): boolean => {
 
 /**
  * Detecta se um WebP é animado através da análise de chunks
- *
- * Analisa a estrutura do arquivo WebP procurando por:
- * - VP8X header com animation flag (bit 1)
- * - Chunks ANIM (animation) ou ANMF (animation frame)
- *
- * SECURITY: Implements robust validation to prevent:
- * - Integer overflow attacks (malicious chunk sizes)
- * - Out-of-bounds reads (buffer overflow)
- * - Infinite loop DoS (iteration limit)
- *
- * @param buffer - WebP buffer to analyze
- * @returns true if WebP is animated, false if static or malformed
- *
- * @example
- * ```typescript
- * const webpBuffer = await readFile('sticker.webp')
- * if (isAnimatedWebP(webpBuffer)) {
- *   console.log('Animated sticker detected')
- * }
- * ```
  */
 export const isAnimatedWebP = (buffer: Buffer): boolean => {
 	if (!isWebPBuffer(buffer)) return false
 
-	const MAX_CHUNK_SIZE = 100 * 1024 * 1024 // 100MB max per chunk
-	const MAX_ITERATIONS = 1000 // Prevent infinite loop
+	const MAX_CHUNK_SIZE = 100 * 1024 * 1024
+	const MAX_ITERATIONS = 1000
 
-	let offset = 12 // Skip RIFF header (12 bytes)
+	let offset = 12
 	let iterations = 0
 
 	while (offset < buffer.length - 8 && iterations++ < MAX_ITERATIONS) {
 		const chunkFourCC = buffer.toString('ascii', offset, offset + 4)
 		const chunkSize = buffer.readUInt32LE(offset + 4)
 
-		// SECURITY: Validate chunk size to prevent integer overflow and buffer overflow
-		if (chunkSize < 0 || chunkSize > MAX_CHUNK_SIZE) {
-			// Invalid chunk size - treat as non-animated
-			return false
-		}
+		if (chunkSize < 0 || chunkSize > MAX_CHUNK_SIZE) return false
+		if (offset + 8 + chunkSize > buffer.length) return false
 
-		// SECURITY: Verify chunk fits within buffer bounds
-		if (offset + 8 + chunkSize > buffer.length) {
-			// Chunk extends beyond buffer - malformed file
-			return false
-		}
-
-		// VP8X extended header - check animation flag
 		if (chunkFourCC === 'VP8X' && offset + 8 < buffer.length) {
 			const flags = buffer[offset + 8]
-			// Bit 1 (0x02) = animation flag
-			if (flags && (flags & 0x02)) return true
+			if (flags && flags & 0x02) return true
 		}
 
-		// Animation chunks
-		if (chunkFourCC === 'ANIM' || chunkFourCC === 'ANMF') {
-			return true
-		}
+		if (chunkFourCC === 'ANIM' || chunkFourCC === 'ANMF') return true
 
-		// Move to next chunk (8 byte header + chunk size + padding)
 		offset += 8 + chunkSize + (chunkSize % 2)
 	}
 
@@ -104,41 +57,26 @@ export const isAnimatedWebP = (buffer: Buffer): boolean => {
 
 /**
  * Detecta se um buffer é Lottie JSON (raw ou gzip-compressed/WAS)
- *
- * WABA usa mimetype `application/was` para stickers Lottie.
- * WAS (WhatsApp Animated Sticker) = gzip-compressed Lottie JSON.
- *
- * Detecção:
- * - Gzip (0x1f 0x8b): descomprime e verifica se é Lottie JSON
- * - JSON bruto: verifica campos Lottie obrigatórios (v, ip, op, layers)
- *
- * @param buffer - Buffer to check
- * @returns true if buffer is Lottie/WAS format
  */
 export const isLottieBuffer = (buffer: Buffer): boolean => {
 	if (buffer.length < 2) return false
 
 	let jsonBuffer: Buffer
 
-	// Check if gzip-compressed (WAS format)
 	if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
 		try {
-			// SECURITY: Limit decompressed output to 50MB to prevent decompression bombs
-			jsonBuffer = gunzipSync(buffer, { maxOutputLength: 50 * 1024 * 1024 }) as Buffer
+			jsonBuffer = gunzipSync(buffer, { maxOutputLength: 50 * 1024 * 1024 })
 		} catch {
 			return false
 		}
 	} else if (buffer[0] === 0x7b) {
-		// Starts with '{' - could be raw Lottie JSON
 		jsonBuffer = buffer
 	} else {
 		return false
 	}
 
-	// Validate Lottie JSON structure: must have v, ip, op, AND layers
 	try {
 		const str = jsonBuffer.toString('utf8', 0, Math.min(jsonBuffer.length, 4096))
-		// Quick check for ALL required Lottie fields
 		return str.includes('"v"') && str.includes('"layers"') && str.includes('"ip"') && str.includes('"op"')
 	} catch {
 		return false
@@ -147,39 +85,28 @@ export const isLottieBuffer = (buffer: Buffer): boolean => {
 
 /**
  * Converte uma imagem para WebP usando Sharp
- * Preserva o buffer original se já for WebP para manter EXIF e animações
- *
- * @param buffer - Image buffer to convert
- * @param logger - Optional logger for debugging
- * @returns Object with WebP buffer and animation status
- *
- * @throws {Boom} If Sharp is not installed and buffer is not WebP
  */
 const convertToWebP = async (
 	buffer: Buffer,
 	logger?: ILogger
 ): Promise<{ webpBuffer: Buffer; isAnimated: boolean; isLottie: boolean }> => {
-	// Lottie/WAS: ensure gzip-compressed format (WAS = gzip Lottie JSON)
 	if (isLottieBuffer(buffer)) {
 		let wasBuffer = buffer
-		// Raw Lottie JSON (starts with '{') must be gzipped to produce valid WAS
 		if (buffer[0] === 0x7b) {
 			logger?.trace('Raw Lottie JSON detected, gzip-compressing to WAS format')
-			wasBuffer = gzipSync(buffer) as Buffer
+			wasBuffer = gzipSync(buffer)
 		}
 
 		logger?.trace('Input is Lottie/WAS format')
 		return { webpBuffer: wasBuffer, isAnimated: true, isLottie: true }
 	}
 
-	// Se já é WebP, preserva o buffer original (mantém EXIF e animações)
 	if (isWebPBuffer(buffer)) {
 		const isAnimated = isAnimatedWebP(buffer)
 		logger?.trace({ isAnimated }, 'Input is already WebP, preserving original buffer')
 		return { webpBuffer: buffer, isAnimated, isLottie: false }
 	}
 
-	// Tenta usar Sharp para converter
 	const lib = await getImageProcessingLibrary()
 
 	if (!lib?.sharp) {
@@ -197,70 +124,42 @@ const convertToWebP = async (
 
 /**
  * Gera hash SHA256 em formato base64 URL-safe (RFC 4648)
- * Usado para nomear arquivos de stickers no ZIP (auto-deduplicação)
- *
- * SECURITY: Correctly implements base64url encoding to prevent hash collisions:
- * - '+' → '-'
- * - '/' → '_' (DIFFERENT from '+' mapping)
- * - '=' padding removed
- *
- * @param buffer - Buffer to hash
- * @returns Base64 URL-safe SHA256 hash (RFC 4648 compliant)
  */
 const generateSha256Hash = (buffer: Buffer): string => {
-	return createHash('sha256')
-		.update(buffer)
-		.digest('base64')
-		.replace(/\+/g, '-') // + becomes -
-		.replace(/\//g, '_') // / becomes _ (CRITICAL: different from + mapping!)
-		.replace(/=/g, '')   // Remove padding
+	return createHash('sha256').update(buffer).digest('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
 }
 
 /**
  * Converte WAMediaUpload para Buffer com limites de segurança
- * Suporta Buffer, Stream, URL e Data URLs
- *
- * SECURITY: Implements protections against:
- * - Memory exhaustion (size limits)
- * - Slow read attacks (timeouts)
- * - Resource DoS (stream cleanup)
- *
- * @param media - Media input (Buffer, Stream, URL or Data URL)
- * @param context - Context for error messages (e.g., 'sticker', 'cover')
- * @param options - Optional size limit and timeout
- * @returns Buffer with media content
- *
- * @throws {Boom} If media format is invalid, too large, or timeout
  */
 const mediaToBuffer = async (
 	media: WAMediaUpload,
 	context: string,
 	options?: { maxSize?: number; timeout?: number }
 ): Promise<Buffer> => {
-	const MAX_SIZE = options?.maxSize || 10 * 1024 * 1024 // 10MB default
-	const TIMEOUT = options?.timeout || 30000 // 30s default
+	const MAX_SIZE = options?.maxSize || 10 * 1024 * 1024
+	const TIMEOUT = options?.timeout || 30000
 
 	if (Buffer.isBuffer(media)) {
-		// SECURITY: Validate buffer size
 		if (media.length > MAX_SIZE) {
 			throw new Boom(`${context} size (${(media.length / 1024).toFixed(2)}KB) exceeds ${MAX_SIZE / 1024}KB limit`, {
 				statusCode: 413
 			})
 		}
+
 		return media
 	} else if (typeof media === 'object' && 'url' in media) {
 		const url = media.url.toString()
 
-		// ENHANCEMENT: Support Data URLs (data:image/...)
 		if (url.startsWith('data:')) {
 			try {
 				const base64Data = url.split(',')[1]
 				if (!base64Data) {
 					throw new Boom(`Invalid data URL for ${context}: missing base64 data`, { statusCode: 400 })
 				}
+
 				const buffer = Buffer.from(base64Data, 'base64')
 
-				// SECURITY: Validate buffer size
 				if (buffer.length > MAX_SIZE) {
 					throw new Boom(
 						`${context} data URL size (${(buffer.length / 1024).toFixed(2)}KB) exceeds ${MAX_SIZE / 1024}KB limit`,
@@ -277,14 +176,11 @@ const mediaToBuffer = async (
 			}
 		}
 
-		// HTTP/HTTPS URLs - download with size limit and timeout
 		const controller = new AbortController()
 		const timeoutId = setTimeout(() => controller.abort(), TIMEOUT)
 
 		try {
-			const response = await fetch(url, {
-				signal: controller.signal
-			})
+			const response = await fetch(url, { signal: controller.signal })
 
 			if (!response.ok) {
 				throw new Boom(`Failed to download ${context} from URL: ${url}`, {
@@ -293,7 +189,6 @@ const mediaToBuffer = async (
 				})
 			}
 
-			// SECURITY: Check Content-Length header before downloading
 			const contentLength = response.headers.get('content-length')
 			if (contentLength && parseInt(contentLength) > MAX_SIZE) {
 				throw new Boom(
@@ -302,7 +197,6 @@ const mediaToBuffer = async (
 				)
 			}
 
-			// SECURITY: Stream download with size validation
 			const chunks: Buffer[] = []
 			let totalSize = 0
 
@@ -310,11 +204,10 @@ const mediaToBuffer = async (
 				throw new Boom(`${context} URL response has no body`, { statusCode: 400, data: { url } })
 			}
 
-			for await (const chunk of response.body as any) {
+			for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
 				const buffer = Buffer.from(chunk)
 				totalSize += buffer.length
 
-				// SECURITY: Enforce size limit during download
 				if (totalSize > MAX_SIZE) {
 					throw new Boom(
 						`${context} download (${(totalSize / 1024).toFixed(2)}KB) exceeded ${MAX_SIZE / 1024}KB limit`,
@@ -330,7 +223,6 @@ const mediaToBuffer = async (
 			clearTimeout(timeoutId)
 		}
 	} else if (typeof media === 'object' && 'stream' in media) {
-		// SECURITY: Read stream with size limit and timeout
 		const chunks: Buffer[] = []
 		let totalSize = 0
 
@@ -345,7 +237,6 @@ const mediaToBuffer = async (
 						const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
 						totalSize += buffer.length
 
-						// SECURITY: Check size limit
 						if (totalSize > MAX_SIZE) {
 							throw new Boom(
 								`${context} stream size (${(totalSize / 1024).toFixed(2)}KB) exceeds ${MAX_SIZE / 1024}KB limit`,
@@ -361,7 +252,6 @@ const mediaToBuffer = async (
 
 			return Buffer.concat(chunks)
 		} catch (error) {
-			// SECURITY: Cleanup on error
 			media.stream.destroy()
 			throw error
 		}
@@ -371,55 +261,13 @@ const mediaToBuffer = async (
 }
 
 export type PrepareStickerPackMessageOptions = {
-	/** Upload function to encrypt and upload media to WhatsApp servers */
 	upload: WAMediaUploadFunction
-	/** Optional logger for debugging */
 	logger?: ILogger
-	/** Timeout for media uploads */
 	mediaUploadTimeoutMs?: number
 }
 
 /**
  * Prepara uma mensagem de sticker pack para envio
- *
- * **Processo:**
- * 1. Valida número de stickers (3-30 conforme padrão WhatsApp oficial)
- * 2. Processa cada sticker (converte para WebP se necessário)
- * 3. Cria ZIP com stickers + cover (deduplicação automática por hash)
- * 4. Criptografa ZIP usando AES-256-CBC + HMAC-SHA256
- * 5. Gera thumbnail da capa (252x252 JPEG)
- * 6. Faz upload do ZIP e thumbnail (reutiliza mesma mediaKey)
- * 7. Retorna proto.Message.StickerPackMessage completo
- *
- * **Especificações WhatsApp:**
- * - 3-30 stickers por pack (oficial)
- * - WebP ou Lottie/WAS (application/was)
- * - Stickers: 512x512 pixels (auto-resize)
- * - Recomendado: 100KB por sticker estático, 500KB animado
- * - Tray icon: 96x96 pixels (PNG no ZIP)
- * - Thumbnail: 252x252 pixels (JPEG, upload separado)
- *
- * @param stickerPack - Sticker pack data with stickers, cover, name, publisher
- * @param options - Upload function and optional logger
- * @returns Prepared StickerPackMessage ready to send
- *
- * @throws {Boom} If validation fails (sticker count, size limits, format issues)
- *
- * @example
- * ```typescript
- * const stickerPackMessage = await prepareStickerPackMessage(
- *   {
- *     name: 'My Pack',
- *     publisher: 'Author',
- *     cover: coverBuffer,
- *     stickers: [
- *       { data: sticker1Buffer, emojis: ['😀'] },
- *       { data: sticker2Buffer, emojis: ['😎'] }
- *     ]
- *   },
- *   { upload: uploadFunction, logger }
- * )
- * ```
  */
 export const prepareStickerPackMessage = async (
 	stickerPack: StickerPack,
@@ -428,13 +276,11 @@ export const prepareStickerPackMessage = async (
 	const { upload, logger, mediaUploadTimeoutMs } = options
 	const { stickers, cover, name, publisher, description, packId } = stickerPack
 
-	// Helper function to encrypt and upload media with guaranteed cleanup
-	// SECURITY FIX #5: Try/finally ensures temp file cleanup even on upload failure
+	// Helper: Upload Media
 	const uploadMedia = async (buffer: Buffer, mediaType: MediaType, opts?: { mediaKey?: Uint8Array }) => {
 		let encFilePath: string | undefined
 
 		try {
-			// Encrypt the media
 			const encrypted = await encryptedStream(buffer, mediaType, {
 				logger,
 				mediaKey: opts?.mediaKey
@@ -442,7 +288,6 @@ export const prepareStickerPackMessage = async (
 
 			encFilePath = encrypted.encFilePath
 
-			// Upload encrypted file
 			const result = await upload(encrypted.encFilePath, {
 				fileEncSha256B64: encrypted.fileEncSha256.toString('base64'),
 				mediaType,
@@ -457,21 +302,69 @@ export const prepareStickerPackMessage = async (
 				mediaKeyTimestamp: result.ts
 			}
 		} finally {
-			// SECURITY: Always cleanup temp file, even on error
 			if (encFilePath) {
 				try {
 					await fs.unlink(encFilePath)
 					logger?.trace({ encFilePath }, 'Cleaned up temporary encrypted file')
 				} catch (unlinkError) {
-					// Log but don't fail - file may not exist
 					logger?.warn({ encFilePath, error: unlinkError }, 'Failed to cleanup temp file')
 				}
 			}
 		}
 	}
 
-	// 1. Validações - Padrão WhatsApp oficial: 3-30 stickers
-	// SECURITY FIX #4: Validate actual valid stickers (not undefined/null)
+	// Helper: Compress Sticker logic extracted to avoid max-depth eslint error
+	const attemptCompression = async (buffer: Buffer, index: number): Promise<Buffer> => {
+		const MAX_SIZE = 1024 * 1024
+		const lib = await getImageProcessingLibrary()
+
+		if (!lib?.sharp) {
+			throw new Boom(
+				`Sticker ${index + 1} exceeds the 1MB hard limit (${(buffer.length / 1024).toFixed(2)}KB). ` +
+					`Sharp library required for auto-compression. Install with: yarn add sharp`,
+				{ statusCode: 400 }
+			)
+		}
+
+		try {
+			const compressed70 = await lib.sharp.default(buffer).webp({ quality: 70 }).toBuffer()
+			if (compressed70.length <= MAX_SIZE) {
+				logger?.info(
+					{
+						index,
+						originalKB: (buffer.length / 1024).toFixed(2),
+						compressedKB: (compressed70.length / 1024).toFixed(2)
+					},
+					`Sticker ${index + 1} compressed successfully (quality 70)`
+				)
+				return compressed70
+			}
+
+			const compressed50 = await lib.sharp.default(buffer).webp({ quality: 50 }).toBuffer()
+			if (compressed50.length <= MAX_SIZE) {
+				logger?.info(
+					{
+						index,
+						originalKB: (buffer.length / 1024).toFixed(2),
+						compressedKB: (compressed50.length / 1024).toFixed(2)
+					},
+					`Sticker ${index + 1} compressed successfully (quality 50)`
+				)
+				return compressed50
+			}
+
+			throw new Boom(`Sticker ${index + 1} still exceeds 1MB after compression. Please use a smaller image.`, {
+				statusCode: 400
+			})
+		} catch (error) {
+			if (error instanceof Boom) throw error
+			throw new Boom(`Sticker ${index + 1} exceeds 1MB and compression failed: ${(error as Error).message}`, {
+				statusCode: 400
+			})
+		}
+	}
+
+	// 1. Validações
 	const validStickers = stickers.filter((s): s is NonNullable<typeof s> => s !== null && s !== undefined)
 
 	if (validStickers.length < 3 || validStickers.length > 30) {
@@ -483,7 +376,6 @@ export const prepareStickerPackMessage = async (
 		)
 	}
 
-	// Validação de nomes (max 128 caracteres)
 	if (name.length > 128) {
 		throw new Boom(`Pack name must be 128 characters or less. Current length: ${name.length}`, {
 			statusCode: 400
@@ -498,34 +390,24 @@ export const prepareStickerPackMessage = async (
 
 	logger?.info({ stickerCount: stickers.length, name, publisher }, 'Preparing sticker pack message')
 
-	// 2. Gera ID do pack se não fornecido
+	// 2. Gera ID
 	const stickerPackId = packId || generateMessageIDV2()
 
-	// 3. Processa stickers e cria estrutura ZIP
-	// SECURITY FIX #6: Parallel processing for better performance (30 stickers = significant speedup)
-	// SECURITY FIX #7: Track deduplication to merge metadata correctly
+	// 3. Processa stickers
 	const stickerData: Record<string, [Uint8Array, { level: 0 }]> = {}
 	const stickerMetadata: proto.Message.StickerPackMessage.ISticker[] = []
-	// Track metadata by hash to merge duplicates
 	const metadataByHash = new Map<string, proto.Message.StickerPackMessage.ISticker>()
 
-	// Process all stickers in parallel for performance
 	const processedStickers = await Promise.all(
 		stickers.map(async (sticker, i) => {
-			if (!sticker) return null // Skip undefined stickers
+			if (!sticker) return null
 
-			// SECURITY FIX #8: Better error context for debugging
 			try {
 				logger?.trace({ index: i }, 'Processing sticker')
 
-				// Obtém buffer do sticker
 				const buffer = await mediaToBuffer(sticker.data, `sticker ${i + 1}`)
+				const { webpBuffer, isAnimated, isLottie } = await convertToWebP(buffer, logger)
 
-				// Detecta formato e converte se necessário
-				// eslint-disable-next-line prefer-const
-				let { webpBuffer, isAnimated, isLottie } = await convertToWebP(buffer, logger)
-
-				// Validate explicit isLottie flag — must match detected format
 				if (sticker.isLottie !== undefined && sticker.isLottie !== isLottie) {
 					throw new Boom(
 						`Sticker ${i + 1}: explicit isLottie=${sticker.isLottie} does not match detected format (detected=${isLottie})`,
@@ -533,7 +415,6 @@ export const prepareStickerPackMessage = async (
 					)
 				}
 
-				// WABA: Enforce 512x512 dimensions for WebP stickers (Lottie is vector, skip)
 				if (!isLottie && isWebPBuffer(webpBuffer)) {
 					const lib = await getImageProcessingLibrary()
 					if (lib?.sharp) {
@@ -552,7 +433,6 @@ export const prepareStickerPackMessage = async (
 					}
 				}
 
-				// ENHANCEMENT: Auto-compression if exceeds 1MB (try quality 70, then 50)
 				const MAX_STICKER_SIZE = 1024 * 1024 // 1MB
 				const recommendedLimit = isAnimated ? 500 : 100
 
@@ -561,57 +441,10 @@ export const prepareStickerPackMessage = async (
 						{ index: i, sizeKB: (webpBuffer.length / 1024).toFixed(2) },
 						`Sticker ${i + 1} exceeds 1MB, attempting compression...`
 					)
-
-					const lib = await getImageProcessingLibrary()
-
-					if (lib?.sharp) {
-						// Try quality 70
-						try {
-							const compressed70 = await lib.sharp.default(webpBuffer).webp({ quality: 70 }).toBuffer()
-
-							if (compressed70.length <= MAX_STICKER_SIZE) {
-								webpBuffer = compressed70
-								logger?.info(
-									{ index: i, originalKB: (webpBuffer.length / 1024).toFixed(2), compressedKB: (compressed70.length / 1024).toFixed(2) },
-									`Sticker ${i + 1} compressed successfully (quality 70)`
-								)
-							} else {
-								// Try quality 50
-								const compressed50 = await lib.sharp.default(webpBuffer).webp({ quality: 50 }).toBuffer()
-
-								if (compressed50.length <= MAX_STICKER_SIZE) {
-									webpBuffer = compressed50
-									logger?.info(
-										{ index: i, originalKB: (webpBuffer.length / 1024).toFixed(2), compressedKB: (compressed50.length / 1024).toFixed(2) },
-										`Sticker ${i + 1} compressed successfully (quality 50)`
-									)
-								} else {
-									// Still too large
-									throw new Boom(
-										`Sticker ${i + 1} still exceeds 1MB after compression (${(compressed50.length / 1024).toFixed(2)}KB). ` +
-											`Please use a smaller image.`,
-										{ statusCode: 400 }
-									)
-								}
-							}
-						} catch (compressionError) {
-							// If compression fails, throw error about size
-							throw new Boom(
-								`Sticker ${i + 1} exceeds 1MB and compression failed: ${(compressionError as Error).message}`,
-								{ statusCode: 400 }
-							)
-						}
-					} else {
-						// No Sharp available, can't compress
-						throw new Boom(
-							`Sticker ${i + 1} exceeds the 1MB hard limit (${(webpBuffer.length / 1024).toFixed(2)}KB). ` +
-								`Sharp library required for auto-compression. Install with: yarn add sharp`,
-							{ statusCode: 400 }
-						)
-					}
+					// Fungsi kompresi dipanggil di sini agar tidak memicu error max-depth eslint
+					webpBuffer = await attemptCompression(webpBuffer, i)
 				}
 
-				// Check recommended size (warning only)
 				const finalSizeKB = webpBuffer.length / 1024
 				if (finalSizeKB > recommendedLimit) {
 					logger?.warn(
@@ -621,7 +454,6 @@ export const prepareStickerPackMessage = async (
 					)
 				}
 
-				// Gera nome do arquivo: hash.webp ou hash.was (WABA: plain_file_hash.ext)
 				const sha256Hash = generateSha256Hash(webpBuffer)
 				const extension = isLottie ? 'was' : 'webp'
 				const fileName = `${sha256Hash}.${extension}`
@@ -640,7 +472,6 @@ export const prepareStickerPackMessage = async (
 					accessibilityLabel: sticker.accessibilityLabel
 				}
 			} catch (error) {
-				// SECURITY FIX #8: Wrap errors with sticker context
 				throw new Boom(`Failed to process sticker ${i + 1}: ${(error as Error).message}`, {
 					statusCode: error instanceof Boom ? error.output.statusCode : 500,
 					data: { stickerIndex: i, originalError: error }
@@ -649,25 +480,18 @@ export const prepareStickerPackMessage = async (
 		})
 	)
 
-	// Build stickerData and merge metadata for duplicates
 	let duplicateCount = 0
 	for (const result of processedStickers) {
 		if (!result) continue
 
 		const { fileName, webpBuffer, isAnimated, isLottie, emojis, accessibilityLabel } = result
-
-		// SECURITY FIX #7: Check if this hash already exists (duplicate sticker)
 		const existingMetadata = metadataByHash.get(fileName)
 
 		if (existingMetadata) {
-			// Duplicate detected - merge metadata (combine emojis and labels)
 			duplicateCount++
-
-			// Merge emojis (deduplicate)
 			const mergedEmojis = Array.from(new Set([...existingMetadata.emojis!, ...emojis]))
 			existingMetadata.emojis = mergedEmojis
 
-			// Merge accessibility labels (concatenate with separator if both exist)
 			if (accessibilityLabel) {
 				if (existingMetadata.accessibilityLabel) {
 					existingMetadata.accessibilityLabel += ` / ${accessibilityLabel}`
@@ -676,15 +500,9 @@ export const prepareStickerPackMessage = async (
 				}
 			}
 
-			logger?.debug(
-				{ fileName, mergedEmojis, duplicateCount },
-				'Duplicate sticker detected - merged metadata'
-			)
+			logger?.debug({ fileName, mergedEmojis, duplicateCount }, 'Duplicate sticker detected - merged metadata')
 		} else {
-			// New sticker - add to ZIP and create metadata
 			stickerData[fileName] = [new Uint8Array(webpBuffer), { level: 0 as 0 }]
-
-			// WABA: mimetype é 'application/was' para Lottie, 'image/webp' para WebP
 			const metadata: proto.Message.StickerPackMessage.ISticker = {
 				fileName,
 				isAnimated,
@@ -707,7 +525,6 @@ export const prepareStickerPackMessage = async (
 	}
 
 	// 4. Processa cover image (tray icon)
-	// SECURITY FIX #8: Error context for cover processing
 	let coverBuffer: Buffer
 	let coverWebP: Buffer
 	let coverFileName: string
@@ -716,13 +533,11 @@ export const prepareStickerPackMessage = async (
 		logger?.trace('Processing cover image')
 		coverBuffer = await mediaToBuffer(cover, 'cover image')
 
-		// Tray icon uses PNG format, 96x96 pixels (official client standard)
 		const lib = await getImageProcessingLibrary()
 		if (!lib?.sharp) {
-			throw new Boom(
-				'Sharp library is required for cover/tray icon processing. Install with: yarn add sharp',
-				{ statusCode: 400 }
-			)
+			throw new Boom('Sharp library is required for cover/tray icon processing. Install with: yarn add sharp', {
+				statusCode: 400
+			})
 		}
 
 		coverWebP = await lib.sharp
@@ -740,8 +555,7 @@ export const prepareStickerPackMessage = async (
 		})
 	}
 
-	// 5. Cria ZIP (level 0 = sem compressão para velocidade)
-	// SECURITY FIX #8: Error context for ZIP creation
+	// 5. Cria ZIP
 	let zipBuffer: Buffer
 	let uniqueFiles: number
 
@@ -753,7 +567,6 @@ export const prepareStickerPackMessage = async (
 
 		logger?.info({ zipSizeKB: (zipBuffer.length / 1024).toFixed(2) }, 'ZIP file created successfully')
 
-		// Validação de tamanho total (30MB limit para segurança)
 		const MAX_PACK_SIZE = 30 * 1024 * 1024
 		if (zipBuffer.length > MAX_PACK_SIZE) {
 			throw new Boom(
@@ -771,7 +584,6 @@ export const prepareStickerPackMessage = async (
 	}
 
 	// 6. Upload do ZIP criptografado
-	// SECURITY FIX #8: Error context for sticker pack upload
 	let stickerPackUpload: Awaited<ReturnType<typeof uploadMedia>>
 
 	try {
@@ -785,7 +597,6 @@ export const prepareStickerPackMessage = async (
 	}
 
 	// 7. Gera thumbnail 252x252 JPEG
-	// SECURITY FIX #8: Error context for thumbnail generation
 	let thumbnailBuffer: Buffer
 
 	try {
@@ -793,10 +604,9 @@ export const prepareStickerPackMessage = async (
 		const lib = await getImageProcessingLibrary()
 
 		if (!lib?.sharp) {
-			throw new Boom(
-				'Sharp library is required for thumbnail generation. Install with: yarn add sharp',
-				{ statusCode: 400 }
-			)
+			throw new Boom('Sharp library is required for thumbnail generation. Install with: yarn add sharp', {
+				statusCode: 400
+			})
 		}
 
 		thumbnailBuffer = await lib.sharp
@@ -813,14 +623,13 @@ export const prepareStickerPackMessage = async (
 		})
 	}
 
-	// 8. Upload do thumbnail (REUTILIZA mesma mediaKey - requerido pelo protocolo!)
-	// SECURITY FIX #8: Error context for thumbnail upload
+	// 8. Upload do thumbnail
 	let thumbUpload: Awaited<ReturnType<typeof uploadMedia>>
 
 	try {
 		logger?.trace('Uploading thumbnail with same mediaKey')
 		thumbUpload = await uploadMedia(thumbnailBuffer, 'thumbnail-sticker-pack', {
-			mediaKey: stickerPackUpload.mediaKey // CRÍTICO: mesma chave!
+			mediaKey: stickerPackUpload.mediaKey
 		})
 	} catch (error) {
 		throw new Boom(`Failed to upload thumbnail: ${(error as Error).message}`, {
@@ -834,14 +643,13 @@ export const prepareStickerPackMessage = async (
 		{
 			packId: stickerPackId,
 			totalStickers: stickers.length,
-			uniqueFiles: uniqueFiles - 1, // minus cover
+			uniqueFiles: uniqueFiles - 1,
 			zipSizeKB: (zipBuffer.length / 1024).toFixed(2)
 		},
 		'Sticker pack message prepared successfully'
 	)
 
 	return proto.Message.StickerPackMessage.create({
-		// Metadata do pack
 		stickerPackId,
 		name,
 		publisher,
@@ -849,19 +657,13 @@ export const prepareStickerPackMessage = async (
 		stickerPackOrigin: proto.Message.StickerPackMessage.StickerPackOrigin.USER_CREATED,
 		stickerPackSize: zipBuffer.length,
 		stickers: stickerMetadata,
-
-		// ZIP file (criptografado)
 		fileSha256: stickerPackUpload.fileSha256,
 		fileEncSha256: stickerPackUpload.fileEncSha256,
 		mediaKey: stickerPackUpload.mediaKey,
 		directPath: stickerPackUpload.directPath,
 		fileLength: zipBuffer.length,
 		mediaKeyTimestamp: stickerPackUpload.mediaKeyTimestamp,
-
-		// Tray icon info
 		trayIconFileName: coverFileName,
-
-		// Thumbnail (criptografado com mesma key)
 		thumbnailDirectPath: thumbUpload.directPath,
 		thumbnailSha256: createHash('sha256').update(thumbnailBuffer).digest(),
 		thumbnailEncSha256: thumbUpload.fileEncSha256,

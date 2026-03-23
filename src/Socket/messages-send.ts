@@ -1033,7 +1033,7 @@ export const makeMessagesSocket = (config: SocketConfig) => {
 			logger.debug({ msgId }, `sending message to ${participants.length} devices`)
 
 			await sendNode(stanza)
-/*
+			/*
 			// Log with [BAILEYS] prefix
 			logMessageSent(msgId, destinationJid)
 

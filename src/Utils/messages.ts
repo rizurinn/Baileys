@@ -40,8 +40,8 @@ import {
 	getRawMediaUploadData,
 	type MediaDownloadOptions
 } from './messages-media'
-import { prepareStickerPackMessage } from './sticker-pack.js'
 import { shouldIncludeReportingToken } from './reporting-utils'
+import { prepareStickerPackMessage } from './sticker-pack.js'
 
 type ExtractByKey<T, K extends PropertyKey> = T extends Record<K, any> ? T : never
 type RequireKey<T, K extends keyof T> = T & {
