@@ -406,7 +406,10 @@ export const prepareStickerPackMessage = async (
 				logger?.trace({ index: i }, 'Processing sticker')
 
 				const buffer = await mediaToBuffer(sticker.data, `sticker ${i + 1}`)
-				const { webpBuffer, isAnimated, isLottie } = await convertToWebP(buffer, logger)
+				const converted = await convertToWebP(buffer, logger)
+
+				let webpBuffer = converted.webpBuffer
+				const { isAnimated, isLottie } = converted
 
 				if (sticker.isLottie !== undefined && sticker.isLottie !== isLottie) {
 					throw new Boom(
