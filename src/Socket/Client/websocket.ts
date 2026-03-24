@@ -1,6 +1,5 @@
-import WebSocket from 'ws'
-import { DEFAULT_ORIGIN } from '../../Defaults'
-import { AbstractSocketClient } from './types'
+import { DEFAULT_ORIGIN } from '../../Defaults/index.js'
+import { AbstractSocketClient } from './types.js'
 
 export class WebSocketClient extends AbstractSocketClient {
 	protected socket: WebSocket | null = null
@@ -23,30 +22,73 @@ export class WebSocketClient extends AbstractSocketClient {
 			return
 		}
 
+		const headers = {
+			Origin: DEFAULT_ORIGIN,
+			...(this.config.options?.headers || {})
+		}
+
+		// TypeScript's default DOM typings don't officially support the second options object
+		// like headers in the WebSocket constructor, so we cast it as 'any' to bypass TS errors.
+		// Bun's internal WebSocket implementation will parse this object correctly.
 		this.socket = new WebSocket(this.url, {
-			origin: DEFAULT_ORIGIN,
-			headers: this.config.options?.headers as {},
-			handshakeTimeout: this.config.connectTimeoutMs,
-			timeout: this.config.connectTimeoutMs,
-			agent: this.config.agent
-		})
+			headers
+		} as any)
 
-		this.socket.setMaxListeners(0)
+		this.socket.onopen = event => {
+			this.emit('open', event)
+		}
 
-		const events = ['close', 'error', 'upgrade', 'message', 'open', 'ping', 'pong', 'unexpected-response']
+		this.socket.onmessage = event => {
+			this.emit('message', event.data)
+		}
 
-		for (const event of events) {
-			this.socket?.on(event, (...args: any[]) => this.emit(event, ...args))
+		this.socket.onerror = event => {
+			this.emit('error', event)
+		}
+
+		this.socket.onclose = event => {
+			this.emit('close', event.code, event.reason)
+		}
+
+		// Native WebSockets do not have built-in timeout parameters,
+		// so we implement a manual timeout logic as per your JS example.
+		if (this.config.connectTimeoutMs) {
+			const timeout = setTimeout(() => {
+				if (this.socket?.readyState === WebSocket.CONNECTING) {
+					void this.close() // <-- Tambahkan 'void' di sini
+					this.emit('error', new Error('Connection timeout'))
+				}
+			}, this.config.connectTimeoutMs)
+
+			const originalOnOpen = this.socket.onopen
+			this.socket.onopen = event => {
+				clearTimeout(timeout)
+				if (originalOnOpen && this.socket) originalOnOpen.call(this.socket, event)
+			}
 		}
 	}
 
-	async close() {
+	async close(): Promise<void> {
 		if (!this.socket) {
 			return
 		}
 
+		if (this.socket.readyState === WebSocket.CLOSED) {
+			this.socket = null
+			return
+		}
+
 		const closePromise = new Promise<void>(resolve => {
-			this.socket?.once('close', resolve)
+			if (this.socket) {
+				const originalOnClose = this.socket.onclose
+				this.socket.onclose = event => {
+					// Call the original close emitter so Baileys knows it closed
+					if (originalOnClose && this.socket) originalOnClose.call(this.socket, event)
+					resolve()
+				}
+			} else {
+				resolve()
+			}
 		})
 
 		this.socket.close()
@@ -55,9 +97,20 @@ export class WebSocketClient extends AbstractSocketClient {
 
 		this.socket = null
 	}
-	send(str: string | Uint8Array, cb?: (err?: Error) => void): boolean {
-		this.socket?.send(str, cb)
 
-		return Boolean(this.socket)
+	send(str: string | Uint8Array, cb?: (err?: Error) => void): boolean {
+		if (this.socket?.readyState !== WebSocket.OPEN) {
+			if (cb) cb(new Error('WebSocket is not open'))
+			return false
+		}
+
+		try {
+			this.socket.send(str)
+			if (cb) cb()
+			return true
+		} catch (error) {
+			if (cb) cb(error as Error)
+			return false
+		}
 	}
 }
