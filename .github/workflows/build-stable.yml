@@ -1,16 +1,16 @@
 name: Build and Release stable
 
 on:
-  workflow_dispatch: # Memungkinkan kamu memicu workflow ini secara manual (tombol "Run workflow")
+  workflow_dispatch:
   push:
     branches:
-      - master # Otomatis berjalan setiap kali ada kode baru yang di-push ke master
+      - master
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Diperlukan agar bot bisa melakukan push ke branch baru
+      contents: write
 
     steps:
       - name: 📦 Checkout Master Branch
@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 2 # Mengambil sedikit history untuk membaca pesan commit terakhir
 
       - name: 🥟 Setup Bun
-        uses: oven-sh/setup-bun@v1
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
@@ -37,17 +37,34 @@ jobs:
           LAST_MSG=$(git log -1 --pretty=%B)
           
           if [ -z "$GEMINI_API_KEY" ]; then
-            # Fallback jika API Key belum dipasang
-            echo "MSG=build(release): automated compilation and optimization from master" >> $GITHUB_OUTPUT
+            # Fallback jika API Key belum ada
+            CLEAN_MSG=$(echo "$LAST_MSG" | head -n 1 | tr -d '\r\n')
+            echo "MSG=build(release): $CLEAN_MSG" >> $GITHUB_OUTPUT
           else
-            # Meminta AI membuat pesan profesional
-            PROMPT="Rewrite this git commit message into a highly professional, single-line conventional commit message for an automated build release (without quotes): $LAST_MSG"
-            RESPONSE=$(curl -s -H "Content-Type: application/json" \
-              "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_API_KEY" \
-              -d "{\"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]}")
+            # MENGATASI ERROR NULL: Gunakan jq agar pesan (termasuk enter/kutip) aman dijadikan JSON
+            JSON_PAYLOAD=$(jq -n --arg msg "$LAST_MSG" '{
+              contents: [{
+                parts: [{
+                  text: ("Rewrite this git commit message into a highly professional, single-line conventional commit message for an automated build release (without quotes): " + $msg)
+                }]
+              }]
+            }')
             
-            # Ekstrak teks dari respon JSON AI
-            AI_MSG=$(echo $RESPONSE | jq -r '.candidates[0].content.parts[0].text' | tr -d '"' | tr -d '\n')
+            # Meminta AI membuat pesan profesional (menggunakan model 1.5-flash yang lebih cepat & handal)
+            RESPONSE=$(curl -s -H "Content-Type: application/json" \
+              "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$GEMINI_API_KEY" \
+              -d "$JSON_PAYLOAD")
+            
+            # Ekstrak teks, jika error/kosong akan mengembalikan string kosong ('// empty')
+            AI_MSG=$(echo "$RESPONSE" | jq -r '.candidates[0].content.parts[0].text // empty' | tr -d '"' | tr -d '\n')
+            
+            # FALLBACK SYSTEM: Jika AI_MSG kosong atau error (misal API timeout), gunakan commit asli
+            if [ -z "$AI_MSG" ] || [ "$AI_MSG" = "null" ]; then
+              echo "AI Error or null response. Using fallback. Response: $RESPONSE"
+              CLEAN_MSG=$(echo "$LAST_MSG" | head -n 1 | tr -d '\r\n')
+              AI_MSG="build: $CLEAN_MSG"
+            fi
+            
             echo "MSG=$AI_MSG" >> $GITHUB_OUTPUT
           fi
 
@@ -58,27 +75,39 @@ jobs:
           cp -r WAProto release_dist/
           cp LICENSE release_dist/
           cp README.md release_dist/
-          cp engine-requirements.js release_dist/
+          # Tambahkan '|| true' agar tidak error jika file ini terhapus di masa depan
+          cp engine-requirements.js release_dist/ || true
           
-          # Menggunakan jq untuk menghapus konfigurasi build dan typescript dari package.json
+          # Menggunakan jq untuk menghapus dependensi Typescript & script build agar clone lebih ringan
           jq 'del(.devDependencies, .dependencies.typescript, .dependencies["tsc-esm-fix"], .scripts.postinstall, .scripts.prepare, .scripts.prepack, .scripts.build, .scripts["build:all"])' package.json > release_dist/package.json
 
       - name: 🚀 Push to 'stable' Branch
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd release_dist
+          # 1. Clone branch 'stable' yang sudah ada (atau buat baru jika belum ada)
+          git clone --branch stable https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git deploy_repo || \
+          (mkdir deploy_repo && cd deploy_repo && git init && git checkout -b stable && git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git)
           
-          # Inisialisasi git baru agar history sebelumnya terhapus (membuat size clone sangat kecil!)
-          git init
+          cd deploy_repo
+          
+          # 2. Konfigurasi identitas GitHub Actions Bot
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # Buat branch baru dan commit file
-          git checkout -b stable
+          # 3. Hapus semua file LAMA di branch ini KECUALI folder .git (Penting agar history tidak terhapus)
+          find . -maxdepth 1 ! -name '.git' ! -name '.' ! -name '..' -exec rm -rf {} +
+          
+          # 4. Salin file build YANG BARU ke dalam folder ini
+          cp -r ../release_dist/* ./
+          
+          # 5. Pengecekan cerdas: Jangan commit jika kode hasil build tidak ada yang berubah
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Tidak ada perubahan kode. Melewati proses commit."
+            exit 0
+          fi
+          
+          # 6. Commit dan Push biasa (Sejarah akan terus menumpuk tanpa terhapus)
           git add .
           git commit -m "${{ steps.ai_commit.outputs.MSG }}"
-          
-          # Force push ke repositori (menimpa branch bun-build yang lama)
-          git remote add origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}.git
-          git push -f origin stable
+          git push origin stable
