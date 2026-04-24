@@ -50,9 +50,10 @@
     "p-queue": "^9.0.0",
     "pino": "^9.6",
     "protobufjs": "^7.2.4",
-    "whatsapp-rust-bridge": "0.5.2",
     "tsc-esm-fix": "^3.1.2",
     "typescript": "^5.8.2"
+    "whatsapp-rust-bridge": "0.5.3",
+    "ws": "^8.13.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
