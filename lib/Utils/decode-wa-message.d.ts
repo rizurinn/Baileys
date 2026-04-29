@@ -10,6 +10,7 @@ export declare const DECRYPTION_RETRY_CONFIG: {
     baseDelayMs: number;
     sessionRecordErrors: string[];
 };
+/** NACK reason codes we send to the server (client → server) */
 export declare const NACK_REASONS: {
     ParsingError: number;
     UnrecognizedStanza: number;
@@ -24,6 +25,17 @@ export declare const NACK_REASONS: {
     UnsupportedAdminRevoke: number;
     UnsupportedLIDGroup: number;
     DBOperationFailed: number;
+};
+/**
+ * Server-side error codes returned in ack stanzas (server → client) that we
+ * currently have dedicated handlers for. Extend as more handlers are added.
+ * Distinct from the client-side NackReason enum (WAWebCreateNackFromStanza).
+ */
+export declare const SERVER_ERROR_CODES: {
+    /** 1:1 message missing privacy token (tctoken) */
+    readonly MissingTcToken: "463";
+    /** Stanza validation failure (SMAX_INVALID) — likely stale device session */
+    readonly SmaxInvalid: "479";
 };
 export declare const extractAddressingContext: (stanza: BinaryNode) => {
     addressingMode: string;
