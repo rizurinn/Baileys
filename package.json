@@ -36,7 +36,7 @@
     "postinstall": "bun run build",
     "release": "bunx release-it",
     "test": "bun test",
-    "test:e2e": "bun test '**/*.test-e2e.ts'",
+    "test:e2e": "NODE_TLS_REJECT_UNAUTHORIZED=0 bun test '**/*.test-e2e.ts'",
     "update:version": "bun run ./scripts/update-version.ts"
   },
   "dependencies": {
