@@ -1,3 +1,4 @@
+import { Boom } from '@hapi/boom';
 import { proto } from '../../WAProto/index.js';
 import type { GroupMetadata, ParticipantAction, SocketConfig, WAMessageKey } from '../Types/index.js';
 import { type BinaryNode } from '../WABinary/index.js';
@@ -99,6 +100,7 @@ export declare const makeGroupsSocket: (config: SocketConfig) => {
     cleanDirtyBits: (type: "account_sync" | "groups", fromTimestamp?: number | string) => Promise<void>;
     addOrEditContact: (jid: string, contact: proto.SyncActionValue.IContactAction) => Promise<void>;
     removeContact: (jid: string) => Promise<void>;
+    placeholderResendCache: import("../Types/index.js").CacheStore;
     addLabel: (jid: string, labels: import("../Types/Label.js").LabelActionBody) => Promise<void>;
     addChatLabel: (jid: string, labelId: string) => Promise<void>;
     removeChatLabel: (jid: string, labelId: string) => Promise<void>;
@@ -118,6 +120,7 @@ export declare const makeGroupsSocket: (config: SocketConfig) => {
         createBufferedFunction<A extends any[], T>(work: (...args: A) => Promise<T>): (...args: A) => Promise<T>;
         flush(): boolean;
         isBuffering(): boolean;
+        destroy(): void;
     };
     authState: {
         creds: import("../Types/index.js").AuthenticationCreds;
@@ -133,8 +136,9 @@ export declare const makeGroupsSocket: (config: SocketConfig) => {
     sendNode: (frame: BinaryNode) => Promise<void>;
     logout: (msg?: string) => Promise<void>;
     end: (error: Error | undefined) => Promise<void>;
-    onUnexpectedError: (err: Error | import("@hapi/boom").Boom, msg: string) => void;
-    uploadPreKeys: (count?: number, retryCount?: number) => Promise<void>;
+    registerSocketEndHandler: (handler: (error: Error | undefined) => void | Promise<void>) => void;
+    onUnexpectedError: (err: Error | Boom, msg: string) => void;
+    uploadPreKeys: (count?: number) => Promise<void>;
     uploadPreKeysToServerIfRequired: () => Promise<void>;
     digestKeyBundle: () => Promise<void>;
     rotateSignedPreKey: () => Promise<void>;
@@ -149,6 +153,8 @@ export declare const makeGroupsSocket: (config: SocketConfig) => {
         jid: string;
         exists: boolean;
     }[] | undefined>;
+    fetchAccountReachoutTimelock: () => Promise<import("../Types/index.js").ReachoutTimelockState>;
+    fetchNewChatMessageCap: () => Promise<import("../Types/index.js").NewChatMessageCapInfo>;
 };
 export declare const extractGroupMetadata: (result: BinaryNode) => GroupMetadata;
 export type GroupsSocket = ReturnType<typeof makeGroupsSocket>;
