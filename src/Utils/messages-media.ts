@@ -184,7 +184,7 @@ export const generateProfilePicture = async (
 ) => {
 	let buffer: Buffer
 
-	const { width: w = 640, height: h = 640 } = dimensions || {}
+	const { width: w = 720, height: h = 720 } = dimensions || {}
 
 	if (Buffer.isBuffer(mediaUpload)) {
 		buffer = mediaUpload
@@ -200,9 +200,9 @@ export const generateProfilePicture = async (
 	if ('sharp' in lib && typeof lib.sharp?.default === 'function') {
 		img = lib.sharp
 			.default(buffer)
-			.resize(w, h)
+			.resize(w, h, { fit: 'inside' })
 			.jpeg({
-				quality: 50
+				quality: 80
 			})
 			.toBuffer()
 	} else if ('jimp' in lib && typeof lib.jimp?.Jimp === 'function') {
