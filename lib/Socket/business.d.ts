@@ -67,7 +67,28 @@ export declare const makeBusinessSocket: (config: SocketConfig) => {
     newsletterUpdatePicture: (jid: string, content: WAMediaUpload) => Promise<unknown>;
     newsletterRemovePicture: (jid: string) => Promise<unknown>;
     newsletterReactMessage: (jid: string, serverId: string, reaction?: string) => Promise<void>;
-    newsletterFetchMessages: (jid: string, count: number, since: number, after: number) => Promise<any>;
+    newsletterFetchMessages: (jid: string, count: number, since: number, after: number) => Promise<{
+        id: string | undefined;
+        serverId: string | undefined;
+        type: string | undefined;
+        timestamp: number | undefined;
+        isSender: boolean;
+        views: number | undefined;
+        forwards: number | undefined;
+        responses: number | undefined;
+        editTimestamp: number | undefined;
+        originalTimestamp: number | undefined;
+        mediaRcat: Uint8Array<ArrayBufferLike> | undefined;
+        reactions: {
+            code: string | undefined;
+            count: number;
+        }[];
+        pollVotes: {
+            count: number;
+            hash: Uint8Array<ArrayBufferLike> | undefined;
+        }[];
+        message: import("../index.js").proto.IMessage | undefined;
+    }[]>;
     subscribeNewsletterUpdates: (jid: string) => Promise<{
         duration: string;
     } | null>;
