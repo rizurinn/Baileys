@@ -167,6 +167,10 @@ type MediaUploadResult = {
     meta_hmac?: string;
     ts?: number;
     fbid?: number;
+    thumbnail_info?: {
+        thumbnail_sha256?: string;
+        thumbnail_direct_path?: string;
+    };
 };
 export type UploadParams = {
     url: string;

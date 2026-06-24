@@ -38,6 +38,9 @@ export declare const DEFAULT_CONNECTION_CONFIG: SocketConfig;
 export declare const MEDIA_PATH_MAP: {
     [T in MediaType]?: string;
 };
+export declare const NEWSLETTER_MEDIA_PATH_MAP: {
+    [T in MediaType]?: string;
+};
 export declare const MEDIA_HKDF_KEY_MAPPING: {
     audio: string;
     document: string;
